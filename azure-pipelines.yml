@@ -179,12 +179,6 @@ extends:
             artifactName: Binaries
             sbomEnabled: false
           - output: pipelineArtifact
-            displayName: 'Publish build artifact: raw'
-            condition: failed()
-            targetPath: '$(Build.BinariesDirectory)\raw'
-            artifactName: raw
-            sbomEnabled: false
-          - output: pipelineArtifact
             displayName: 'Publish build artifact: logs'
             condition: succeededOrFailed()
             targetPath: '$(Build.SourcesDirectory)\logs'
@@ -200,11 +194,6 @@ extends:
             targetPath: '$(Build.SourcesDirectory)/Python/Tests/TestData/default.runsettings'
             artifactName: 'RunSettings'
             sbomEnabled: false
-          - ${{ if notin(variables['Build.Reason'], 'PullRequest') }}:
-            - output: pipelineArtifact
-              displayName: 'Publish build artifact: BoM'
-              targetPath: '$(Build.BinariesDirectory)\layout'
-              artifactName: SBOM
 
         steps:
 
@@ -235,47 +224,8 @@ extends:
         # publish symbols
         - template: /Build/templates/publish_symbols.yml@self
 
-        # MicroBuild cleanup
-        - task: MicroBuildCleanup@1
-          displayName: 'Execute cleanup tasks'
-          condition: succeededOrFailed()
-
-        # Publish test data
-        - template: /Build/templates/publish_test_data.yml@self
-
-        # Installer job: builds installer, uploads vsts drop, and creates bootstrapper
-        # Runs in parallel with the test job after the build job completes
-      - ${{ if or(ne(variables['Build.Reason'], 'PullRequest'), eq(parameters.buildInstaller, true)) }}:
-        - job: installer
-          displayName: Installer & Bootstrapper
-          dependsOn: build
-          steps:
-          - checkout: self
-            clean: true
-            fetchDepth: 1
-
-          # install microbuild plugins needed for swixproj/vsmanproj
-          - template: /Build/templates/install_microbuild_plugins.yml@self
-
-          # Restore packages
-          - template: /Build/templates/restore_packages.yml@self
-            parameters:
-              pylanceVersion: ${{ parameters.pylanceVersion }}
-              pylanceReleaseType: ${{ variables.pylanceReleaseTypeVar }}
-              debugpyVersion: ${{ parameters.debugpyVersion }}
-
-          # Download binaries from the build job
-          - download: current
-            artifact: Binaries
-            displayName: 'Download build binaries'
-
-          # Copy binaries to expected location
-          - powershell: |
-              $source = '$(Pipeline.Workspace)\Binaries'
-              $dest = '$(Build.BinariesDirectory)\raw\binaries'
-              New-Item -ItemType Directory -Force -Path $dest | Out-Null
-              Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force
-            displayName: 'Copy binaries to expected location'
+        # Installer & Bootstrapper (non-PR builds, or when buildInstaller parameter is set)
+        - ${{ if or(ne(variables['Build.Reason'], 'PullRequest'), eq(parameters.buildInstaller, true)) }}:
 
           # Generate the bill of materials
           - task: AzureArtifacts.manifest-generator-task.manifest-generator-task.ManifestGeneratorTask@0
@@ -286,7 +236,7 @@ extends:
               PackageVersion: '$(VSTarget)'
             continueOnError: true
 
-          # Build the installer (product already built, only setup projects)
+          # Build the installer
           - task: MSBuild@1
             displayName: 'Build installer'
             inputs:
@@ -314,10 +264,27 @@ extends:
           # Create VS bootstrapper for testing
           - template: Build/templates/create_vs_bootstrapper.yml@self
 
-          # MicroBuild cleanup
-          - task: MicroBuildCleanup@1
-            displayName: 'Execute cleanup tasks'
-            condition: succeededOrFailed()
+        # Build, sign, and pack NuGet package (non-PR builds, or when PublishNugetPackageAsBuildArtifact is set)
+        - ${{ if or(notin(variables['Build.Reason'], 'PullRequest'), eq(variables['PublishNugetPackageAsBuildArtifact'], true)) }}:
+          - template: /Build/templates/build_nuget_package.yml@self
+            parameters:
+              ptvsPackageVersion: ${{ variables.ptvsPackageVersionVar }}
+
+          # Publish NuGet package as build artifact
+          - task: 1ES.PublishBuildArtifacts@1
+            displayName: 'Publish Artifact: pkg'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)\pkg'
+              ArtifactName: pkg
+              sbomEnabled: false
+
+        # MicroBuild cleanup
+        - task: MicroBuildCleanup@1
+          displayName: 'Execute cleanup tasks'
+          condition: succeededOrFailed()
+
+        # Publish test data
+        - template: /Build/templates/publish_test_data.yml@self
 
         # Run tests on mixed mode debugger
       - ${{ if or(eq(variables['Build.Reason'], 'PullRequest'), eq(variables['SkipGlassCache'], true)) }}:
@@ -336,48 +303,5 @@ extends:
             parameters:
               skipGlassCache: ${{ parameters.skipGlassCache }}
 
-        # Build, sign, and publish NuGet package
-      - ${{ if or(notin(variables['Build.Reason'], 'PullRequest'), eq(variables['PublishNugetPackageAsBuildArtifact'], true)) }}:
-        - job: nuget
-          displayName: NuGet Package
-          dependsOn: build
-          steps:
-          - checkout: self
-            clean: true
-            fetchDepth: 1
-
-          # install microbuild plugins needed for signing
-          - template: /Build/templates/install_microbuild_plugins.yml@self
-
-          # Download binaries from the build job
-          - download: current
-            artifact: Binaries
-            displayName: 'Download build binaries'
-
-          # Copy binaries to expected location
-          - powershell: |
-              $source = '$(Pipeline.Workspace)\Binaries'
-              $dest = '$(Build.BinariesDirectory)\raw\binaries'
-              New-Item -ItemType Directory -Force -Path $dest | Out-Null
-              Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force
-            displayName: 'Copy binaries to expected location'
-
-          # Build, sign, and pack nuget package
-          - template: /Build/templates/build_nuget_package.yml@self
-            parameters:
-              ptvsPackageVersion: ${{ variables.ptvsPackageVersionVar }}
-
-          # Publish NuGet package as build artifact
-          - task: 1ES.PublishBuildArtifacts@1
-            displayName: 'Publish Artifact: pkg'
-            inputs:
-              PathtoPublish: '$(Build.ArtifactStagingDirectory)\pkg'
-              ArtifactName: pkg
-              sbomEnabled: false
-
-          # MicroBuild cleanup
-          - task: MicroBuildCleanup@1
-            displayName: 'Execute cleanup tasks'
-            condition: succeededOrFailed()
 
 
